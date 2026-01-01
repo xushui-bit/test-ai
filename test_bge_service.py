@@ -394,7 +394,7 @@ def run_all_tests():
 
 if __name__ == "__main__":
     try:
-        for i in range(1):
+        for i in range(2):
             run_all_tests()
     except KeyboardInterrupt:
         print("\n\n测试被用户中断")
