@@ -392,10 +392,13 @@ def run_all_tests():
         print_error(f"有 {total - passed} 个测试失败")
 
 
+def main():
+    for i in range(2):
+            run_all_tests()
+
 if __name__ == "__main__":
     try:
-        for i in range(1):
-            run_all_tests()
+        main()
     except KeyboardInterrupt:
         print("\n\n测试被用户中断")
     except Exception as e:
