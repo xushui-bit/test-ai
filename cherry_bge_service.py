@@ -11,8 +11,9 @@ import torch
 import uvicorn
 from typing import List, Optional, Union
 from functools import wraps
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 
 # 设置离线模式以使用本地模型
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
@@ -37,7 +38,7 @@ class Settings:
     cache_dir: str = os.environ.get("BGE_CACHE_DIR", r"d:\ai\models\baai\bge-small-zh-v1.5-cache")
     port: int = int(os.environ.get("BGE_PORT", "7860"))
     host: str = os.environ.get("BGE_HOST", "127.0.0.1")
-    device: str = os.environ.get("BGE_DEVICE", "gpu")
+    device: str = os.environ.get("BGE_DEVICE", "cuda")
     batch_size: int = int(os.environ.get("BGE_BATCH_SIZE", "32"))
     max_seq_length: int = int(os.environ.get("BGE_MAX_SEQ_LENGTH", "512"))
 
@@ -84,13 +85,14 @@ class EnhancedReq(BaseModel):
     batch_size: Optional[int] = None
     show_progress: bool = False
 
-    @validator('texts')
+    @field_validator('texts')
+    @classmethod
     def texts_non_empty(cls, v):
         """验证文本列表非空"""
         if not v or len(v) == 0:
-            raise ValueError('texts must be non-empty')
+            raise ValueError('文本列表不能为空')
         if len(v) > 1000:  # 添加限制
-            raise ValueError('too many texts, maximum 1000 per request')
+            raise ValueError('文本数量过多，每次请求最多1000个')
         return v
 
 class EnhancedResp(BaseModel):
@@ -100,11 +102,35 @@ class EnhancedResp(BaseModel):
     normalized: bool
     count: int
 
+import pickle
+from collections import OrderedDict
+from datetime import datetime, timedelta
+import threading
+
 class EmbeddingCache:
-    """嵌入缓存类，提高重复请求的响应速度"""
-    def __init__(self, max_size=10000):
-        self.cache = {}
+    """
+    嵌入缓存类，提高重复请求的响应速度
+    支持持久化存储、LRU策略、过期机制和统计信息
+    """
+    def __init__(self, max_size=10000, cache_dir=None, ttl_hours=24):
+        self.cache = OrderedDict()
         self.max_size = max_size
+        self.cache_dir = cache_dir
+        self.ttl = timedelta(hours=ttl_hours)
+        self.lock = threading.RLock()
+        
+        # 统计信息
+        self.stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "expired": 0
+        }
+        
+        # 加载持久化缓存
+        if cache_dir:
+            self.cache_file = os.path.join(cache_dir, "embedding_cache.pkl")
+            self._load_cache()
 
     def get_key(self, text):
         """生成文本的缓存键"""
@@ -112,16 +138,166 @@ class EmbeddingCache:
 
     def get(self, text):
         """获取缓存的嵌入向量"""
-        return self.cache.get(self.get_key(text))
+        key = self.get_key(text)
+        with self.lock:
+            if key not in self.cache:
+                self.stats["misses"] += 1
+                return None
+            
+            entry = self.cache[key]
+            
+            # 检查是否过期
+            if self._is_expired(entry):
+                del self.cache[key]
+                self.stats["expired"] += 1
+                self.stats["misses"] += 1
+                return None
+            
+            # LRU: 移动到末尾
+            self.cache.move_to_end(key)
+            self.stats["hits"] += 1
+            return entry["embedding"]
 
     def set(self, text, embedding):
         """设置缓存的嵌入向量"""
-        if len(self.cache) >= self.max_size:
-            # 简单的LRU策略：删除第一个项目
-            self.cache.pop(next(iter(self.cache)))
-        self.cache[self.get_key(text)] = embedding
+        key = self.get_key(text)
+        with self.lock:
+            # 如果已存在，更新并移动到末尾
+            if key in self.cache:
+                self.cache.move_to_end(key)
+            
+            # 检查是否需要淘汰
+            if len(self.cache) >= self.max_size and key not in self.cache:
+                # 淘汰最久未使用的项目
+                self.cache.popitem(last=False)
+                self.stats["evictions"] += 1
+            
+            # 存储缓存条目（包含时间戳）
+            self.cache[key] = {
+                "embedding": embedding,
+                "timestamp": datetime.now(),
+                "text": text
+            }
 
-embedding_cache = EmbeddingCache()
+    def get_batch(self, texts):
+        """批量获取缓存的嵌入向量"""
+        results = {}
+        with self.lock:
+            for text in texts:
+                key = self.get_key(text)
+                if key in self.cache:
+                    entry = self.cache[key]
+                    if not self._is_expired(entry):
+                        self.cache.move_to_end(key)
+                        self.stats["hits"] += 1
+                        results[key] = entry["embedding"]
+                    else:
+                        del self.cache[key]
+                        self.stats["expired"] += 1
+                        self.stats["misses"] += 1
+                else:
+                    self.stats["misses"] += 1
+        return results
+
+    def set_batch(self, texts, embeddings):
+        """批量设置缓存的嵌入向量"""
+        with self.lock:
+            for text, emb in zip(texts, embeddings):
+                self.set(text, emb)
+
+    def _is_expired(self, entry):
+        """检查缓存条目是否过期"""
+        if self.ttl is None:
+            return False
+        return datetime.now() - entry["timestamp"] > self.ttl
+
+    def clear(self):
+        """清空缓存"""
+        with self.lock:
+            self.cache.clear()
+            self.stats = {
+                "hits": 0,
+                "misses": 0,
+                "evictions": 0,
+                "expired": 0
+            }
+
+    def get_stats(self):
+        """获取缓存统计信息"""
+        with self.lock:
+            total_requests = self.stats["hits"] + self.stats["misses"]
+            hit_rate = self.stats["hits"] / total_requests if total_requests > 0 else 0
+            return {
+                "size": len(self.cache),
+                "max_size": self.max_size,
+                "hits": self.stats["hits"],
+                "misses": self.stats["misses"],
+                "evictions": self.stats["evictions"],
+                "expired": self.stats["expired"],
+                "hit_rate": hit_rate,
+                "ttl_hours": self.ttl.total_seconds() / 3600 if self.ttl else None
+            }
+
+    def _load_cache(self):
+        """从文件加载缓存"""
+        if not os.path.exists(self.cache_file):
+            return
+        
+        try:
+            with open(self.cache_file, 'rb') as f:
+                data = pickle.load(f)
+                # 加载缓存数据
+                self.cache = OrderedDict(data.get("cache", {}))
+                # 加载统计信息
+                self.stats = data.get("stats", {
+                    "hits": 0,
+                    "misses": 0,
+                    "evictions": 0,
+                    "expired": 0
+                })
+                log.info(f"Loaded {len(self.cache)} cached embeddings from {self.cache_file}")
+        except Exception as e:
+            log.warning(f"Failed to load cache from {self.cache_file}: {e}")
+
+    def save_cache(self):
+        """保存缓存到文件"""
+        if not self.cache_dir:
+            return
+        
+        try:
+            data = {
+                "cache": dict(self.cache),
+                "stats": self.stats,
+                "saved_at": datetime.now().isoformat()
+            }
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(data, f)
+            log.info(f"Saved {len(self.cache)} cached embeddings to {self.cache_file}")
+        except Exception as e:
+            log.warning(f"Failed to save cache to {self.cache_file}: {e}")
+
+    def remove_expired(self):
+        """移除所有过期的缓存条目"""
+        with self.lock:
+            expired_keys = [k for k, v in self.cache.items() if self._is_expired(v)]
+            for key in expired_keys:
+                del self.cache[key]
+            return len(expired_keys)
+
+embedding_cache = EmbeddingCache(max_size=10000, cache_dir=config.cache_dir, ttl_hours=24)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """生命周期上下文管理器，用于处理启动和关闭事件"""
+    # 启动阶段
+    log.info("Starting up embedding service...")
+    model_manager.load_model()
+    yield
+    # 关闭阶段
+    log.info("Shutting down embedding service...")
+    embedding_cache.save_cache()
+
+app = FastAPI(title="bge-embed-service", lifespan=lifespan)
 
 class ModelManager:
     """模型管理器，负责加载和管理嵌入模型"""
@@ -145,12 +321,17 @@ class ModelManager:
         else:
             device = config.device
 
+        # 验证CUDA是否可用
+        if device == "cuda" and not torch.cuda.is_available():
+            log.warning("CUDA requested but not available, falling back to CPU")
+            device = "cpu"
+
         log.info(f"Using device: {device}")
 
         try:
             if SentenceTransformer is None:
-                # sentence-transformers not available in this environment
-                log.warning("sentence-transformers not installed or failed to import; using DummyEmbedder")
+                # sentence-transformers库在此环境中不可用
+                log.warning("sentence-transformers未安装或导入失败，使用虚拟嵌入器")
                 self.model = DummyEmbedder(dim=384)
                 self.model_info = {
                     "source": "dummy",
@@ -160,7 +341,7 @@ class ModelManager:
                 }
                 return self.model
 
-            # load actual model
+            # 加载实际模型
             self.model = SentenceTransformer(
                 config.model_name,
                 device=device,
@@ -220,12 +401,6 @@ def timing_decorator(func):
         return result
     return wrapper
 
-@app.on_event("startup")
-def startup_event():
-    """应用启动时预加载模型"""
-    log.info("Starting up embedding service...")
-    model_manager.load_model()
-
 @app.get("/health")
 def health():
     """健康检查端点"""
@@ -250,19 +425,20 @@ def embed(req: EnhancedReq):
     model = model_manager.model
 
     if model is None:
-        raise HTTPException(status_code=503, detail="Embedding model not available")
+        raise HTTPException(status_code=503, detail="嵌入模型不可用")
 
     try:
-        # 检查缓存
-        cached_embeddings = []
+        # 批量检查缓存
+        cached_results = embedding_cache.get_batch(req.texts)
         texts_to_process = []
         cache_indices = []
+        cached_embeddings_map = {}
 
         for i, text in enumerate(req.texts):
-            cached = embedding_cache.get(text)
-            if cached is not None:
-                cached_embeddings.append(cached)
+            key = embedding_cache.get_key(text)
+            if key in cached_results:
                 cache_indices.append(i)
+                cached_embeddings_map[i] = cached_results[key]
             else:
                 texts_to_process.append(text)
 
@@ -275,22 +451,24 @@ def embed(req: EnhancedReq):
                 batch_size=req.batch_size or config.batch_size
             )
 
-            # 缓存新结果
-            for text, emb in zip(texts_to_process, new_embeddings):
-                embedding_cache.set(text, emb)
+            # 批量缓存新结果
+            embedding_cache.set_batch(texts_to_process, new_embeddings)
         else:
             new_embeddings = np.array([])
 
         # 合并结果
         final_batch_size = len(req.texts)
-        if cached_embeddings and new_embeddings.size > 0:
+        if cached_embeddings_map and new_embeddings.size > 0:
             embedding_dim = new_embeddings.shape[1]
             all_embeddings = np.zeros((final_batch_size, embedding_dim))
-            all_embeddings[cache_indices] = cached_embeddings
+            for i, emb in cached_embeddings_map.items():
+                all_embeddings[i] = emb
             process_indices = [i for i in range(final_batch_size) if i not in cache_indices]
             all_embeddings[process_indices] = new_embeddings
-        elif cached_embeddings:
-            all_embeddings = np.array(cached_embeddings)
+        elif cached_embeddings_map:
+            all_embeddings = np.zeros((final_batch_size, next(iter(cached_embeddings_map.values())).shape[0]))
+            for i, emb in cached_embeddings_map.items():
+                all_embeddings[i] = emb
         else:
             all_embeddings = new_embeddings
 
@@ -307,7 +485,7 @@ def embed(req: EnhancedReq):
 
     except Exception as e:
         log.exception("Failed to compute embeddings: %s", e)
-        raise HTTPException(status_code=500, detail="embedding failed")
+        raise HTTPException(status_code=500, detail="嵌入计算失败")
 
 # 兼容旧版API
 class Req(BaseModel):
@@ -343,24 +521,25 @@ def openai_embeddings(req: OpenAIEmbReq):
         # 将输入标准化为字符串列表
         texts = [req.input] if isinstance(req.input, str) else req.input
         if not texts or len(texts) == 0:
-            raise HTTPException(status_code=400, detail="input must be a non-empty string or list of strings")
+            raise HTTPException(status_code=400, detail="输入必须是非空字符串或字符串列表")
 
         # 确保模型已加载
         model_manager.load_model()
         model = model_manager.model
         if model is None:
-            raise HTTPException(status_code=503, detail="Embedding model not available")
+            raise HTTPException(status_code=503, detail="嵌入模型不可用")
 
-        # 检查缓存
-        cached_embeddings = []
+        # 批量检查缓存
+        cached_results = embedding_cache.get_batch(texts)
         texts_to_process = []
         cache_indices = []
+        cached_embeddings_map = {}
 
         for i, text in enumerate(texts):
-            cached = embedding_cache.get(text)
-            if cached is not None:
-                cached_embeddings.append(cached)
+            key = embedding_cache.get_key(text)
+            if key in cached_results:
                 cache_indices.append(i)
+                cached_embeddings_map[i] = cached_results[key]
             else:
                 texts_to_process.append(text)
 
@@ -373,22 +552,24 @@ def openai_embeddings(req: OpenAIEmbReq):
                 batch_size=config.batch_size
             )
 
-            # 缓存新结果
-            for text, emb in zip(texts_to_process, new_embeddings):
-                embedding_cache.set(text, emb)
+            # 批量缓存新结果
+            embedding_cache.set_batch(texts_to_process, new_embeddings)
         else:
             new_embeddings = np.array([])
 
         # 合并结果
         final_batch_size = len(texts)
-        if cached_embeddings and new_embeddings.size > 0:
-            embedding_dim = new_embeddings.shape[1] if new_embeddings.size > 0 else cached_embeddings[0].shape[0]
+        if cached_embeddings_map and new_embeddings.size > 0:
+            embedding_dim = new_embeddings.shape[1]
             all_embeddings = np.zeros((final_batch_size, embedding_dim))
-            all_embeddings[cache_indices] = cached_embeddings
+            for i, emb in cached_embeddings_map.items():
+                all_embeddings[i] = emb
             process_indices = [i for i in range(final_batch_size) if i not in cache_indices]
             all_embeddings[process_indices] = new_embeddings
-        elif cached_embeddings:
-            all_embeddings = np.array(cached_embeddings)
+        elif cached_embeddings_map:
+            all_embeddings = np.zeros((final_batch_size, next(iter(cached_embeddings_map.values())).shape[0]))
+            for i, emb in cached_embeddings_map.items():
+                all_embeddings[i] = emb
         else:
             all_embeddings = new_embeddings
 
@@ -422,7 +603,7 @@ def openai_embeddings(req: OpenAIEmbReq):
         raise
     except Exception as e:
         log.exception("OpenAI-style embedding failed: %s", e)
-        raise HTTPException(status_code=500, detail="embedding failed")
+        raise HTTPException(status_code=500, detail="嵌入计算失败")
 
 # LangChain兼容路由 - 修复潜在的环路问题
 class LangChainEmbReq(BaseModel):
@@ -440,26 +621,26 @@ def langchain_embeddings(req: LangChainEmbReq):
         # 将输入标准化为字符串列表
         input_texts = [req.input] if isinstance(req.input, str) else req.input
         if not input_texts:
-            raise HTTPException(status_code=400, detail="input must be a non-empty string or list of strings")
+            raise HTTPException(status_code=400, detail="输入必须是非空字符串或字符串列表")
 
         # 确保模型已加载
         model_manager.load_model()
         model = model_manager.model
 
         if model is None:
-            raise HTTPException(status_code=503, detail="Model not available")
+            raise HTTPException(status_code=503, detail="模型不可用")
 
-        # 直接处理嵌入，避免循环调用
-        # 检查缓存
-        cached_embeddings = []
+        # 批量检查缓存
+        cached_results = embedding_cache.get_batch(input_texts)
         texts_to_process = []
         cache_indices = []
+        cached_embeddings_map = {}
 
         for i, text in enumerate(input_texts):
-            cached = embedding_cache.get(text)
-            if cached is not None:
-                cached_embeddings.append(cached)
+            key = embedding_cache.get_key(text)
+            if key in cached_results:
                 cache_indices.append(i)
+                cached_embeddings_map[i] = cached_results[key]
             else:
                 texts_to_process.append(text)
 
@@ -472,22 +653,24 @@ def langchain_embeddings(req: LangChainEmbReq):
                 batch_size=config.batch_size
             )
 
-            # 缓存新结果
-            for text, emb in zip(texts_to_process, new_embeddings):
-                embedding_cache.set(text, emb)
+            # 批量缓存新结果
+            embedding_cache.set_batch(texts_to_process, new_embeddings)
         else:
             new_embeddings = np.array([])
 
         # 合并结果
         final_batch_size = len(input_texts)
-        if cached_embeddings and new_embeddings.size > 0:
-            embedding_dim = new_embeddings.shape[1] if new_embeddings.size > 0 else cached_embeddings[0].shape[0]
+        if cached_embeddings_map and new_embeddings.size > 0:
+            embedding_dim = new_embeddings.shape[1]
             all_embeddings = np.zeros((final_batch_size, embedding_dim))
-            all_embeddings[cache_indices] = cached_embeddings
+            for i, emb in cached_embeddings_map.items():
+                all_embeddings[i] = emb
             process_indices = [i for i in range(final_batch_size) if i not in cache_indices]
             all_embeddings[process_indices] = new_embeddings
-        elif cached_embeddings:
-            all_embeddings = np.array(cached_embeddings)
+        elif cached_embeddings_map:
+            all_embeddings = np.zeros((final_batch_size, next(iter(cached_embeddings_map.values())).shape[0]))
+            for i, emb in cached_embeddings_map.items():
+                all_embeddings[i] = emb
         else:
             all_embeddings = new_embeddings
 
@@ -520,7 +703,36 @@ def langchain_embeddings(req: LangChainEmbReq):
         raise
     except Exception as e:
         log.exception("LangChain embeddings failed: %s", e)
-        raise HTTPException(status_code=500, detail="embedding failed")
+        raise HTTPException(status_code=500, detail="嵌入计算失败")
+
+
+# 缓存管理 API
+@app.get("/cache/stats")
+def get_cache_stats():
+    """获取缓存统计信息"""
+    return embedding_cache.get_stats()
+
+@app.post("/cache/clear")
+def clear_cache():
+    """清空缓存"""
+    embedding_cache.clear()
+    return {"status": "ok", "message": "缓存已清空"}
+
+@app.post("/cache/save")
+def save_cache():
+    """保存缓存到文件"""
+    embedding_cache.save_cache()
+    return {"status": "ok", "message": "缓存已保存"}
+
+@app.post("/cache/remove-expired")
+def remove_expired_cache():
+    """移除过期的缓存条目"""
+    removed_count = embedding_cache.remove_expired()
+    return {
+        "status": "ok",
+        "message": f"已移除 {removed_count} 个过期条目",
+        "removed_count": removed_count
+    }
 
 
 if __name__ == "__main__":
