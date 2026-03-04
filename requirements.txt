@@ -2,10 +2,7 @@ fastapi
 uvicorn[standard]
 sentence-transformers
 torch
-transformers
 safetensors
 huggingface_hub
-requests
-python-dotenv
 pytest
 pytest-cov
