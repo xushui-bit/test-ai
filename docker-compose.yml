@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  bge-embed-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bge-embed-service:latest
+    container_name: bge-embed-service
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./models:/app/models
+    environment:
+      - BGE_MODEL=/app/models/baai/bge-small-zh-v1.5
+      - BGE_CACHE_DIR=/app/models/baai/bge-small-zh-v1.5-cache
+      - BGE_PORT=7860
+      - BGE_HOST=0.0.0.0
+      - BGE_DEVICE=cpu
+      - BGE_BATCH_SIZE=32
+      - BGE_MAX_SEQ_LENGTH=512
+      - TRANSFORMERS_OFFLINE=1
+      - HF_HUB_OFFLINE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# GPU 版本（需要 nvidia-docker）
+# services:
+#   bge-embed-service:
+#     deploy:
+#       resources:
+#         reservations:
+#           devices:
+#             - driver: nvidia
+#               count: 1
+#               capabilities: [gpu]
+#     environment:
+#       - BGE_DEVICE=gpu
