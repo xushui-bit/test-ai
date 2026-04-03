@@ -28,3 +28,6 @@ coverage_report/
 # OS
 .DS_Store
 Thumbs.db
+
+#models
+models/

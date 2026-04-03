@@ -20,15 +20,27 @@
 ## 项目结构
 ```
 D:\ai\
-├── cherry_bge_service.py      # 主服务文件
-├── requirements.txt          # 项目依赖
-├── IFLOW.md                 # 项目上下文文档
-├── QWEN.md                  # 当前文档
-├── __pycache__/             # Python缓存目录
-├── .venv/                   # Python虚拟环境
-└── models/                  # 模型目录
-    └── baai/                # BAAI模型目录
-        └── bge-small-zh-v1.5/ # BGE中文模型
+├── cherry_bge_service.py    # 主服务入口
+├── requirements.txt         # 依赖
+├── Dockerfile              # Docker 配置
+├── docker-compose.yml      # Docker Compose 配置
+├── pytest.ini              # pytest 配置
+├── README.md               # 项目说明
+├── AGENTS.md              # Agent 编码规范
+├── .gitignore             # Git 忽略配置
+├── docs/                  # 文档
+│   ├── COMMANDS.md
+│   ├── QWEN.md
+│   └── IFLOW.md
+├── models/                 # 模型文件
+│   └── baai/
+│       └── bge-small-zh-v1.5/
+├── tests/                 # 测试文件
+│   ├── test_api.py
+│   └── test_performance.py
+└── scripts/               # 启动脚本
+    ├── start_service.ps1
+    └── ...
 ```
 
 ## 配置选项

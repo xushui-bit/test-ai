@@ -63,7 +63,7 @@ python cherry_bge_service.py
 
 ### 3. 运行测试
 ```batch
-python test_bge_service.py
+pytest
 ```
 
 ## API端点
@@ -128,7 +128,7 @@ curl -X POST http://127.0.0.1:7860/cache/save
 | BGE_CACHE_DIR | `D:\ai\models\baai\bge-small-zh-v1.5-cache` | 缓存目录 |
 | BGE_PORT | 7860 | 服务端口 |
 | BGE_HOST | 127.0.0.1 | 服务主机 |
-| BGE_DEVICE | gpu | 设备选择 (cpu/gpu/auto) |
+| BGE_DEVICE | cuda | 设备选择 (cpu/gpu/auto) |
 | BGE_BATCH_SIZE | 32 | 批处理大小 |
 | BGE_MAX_SEQ_LENGTH | 512 | 最大序列长度 |
 

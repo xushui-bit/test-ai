@@ -2,6 +2,55 @@
 
 基于 FastAPI 的本地 BGE 中文嵌入服务，为本地模型提供文本嵌入功能。
 
+## 模型信息
+
+### 默认模型
+
+| 属性 | 值 |
+|------|-----|
+| **模型名称** | BAAI/bge-small-zh-v1.5 |
+| **模型路径** | `D:\ai\models\baai\bge-small-zh-v1.5` |
+| **嵌入维度** | 512 |
+| **最大序列长度** | 512 tokens |
+| **语言** | 中文 |
+| **框架** | Sentence Transformers |
+
+### 模型说明
+
+- **开发者**：北京智源人工智能研究院 (BAAI)
+- **版本**：v1.5
+- **规模**：small (约 24M 参数)
+- **优化方向**：针对中文文本的语义理解和嵌入生成进行了优化
+
+### 支持的模型配置
+
+通过环境变量可以自定义模型配置：
+
+| 环境变量 | 默认值 | 描述 |
+|----------|--------|------|
+| BGE_MODEL | `D:\ai\models\baai\bge-small-zh-v1.5` | 模型文件路径 |
+| BGE_CACHE_DIR | `D:\ai\models\baai\bge-small-zh-v1.5-cache` | 缓存目录 |
+| BGE_DEVICE | cuda | 运行设备 (cpu/gpu/auto) |
+| BGE_BATCH_SIZE | 32 | 批处理大小 |
+| BGE_MAX_SEQ_LENGTH | 512 | 最大序列长度 |
+
+### 设备支持
+
+- **CPU 模式**：默认模式，适用于无 GPU 环境
+- **GPU 模式**：需要 NVIDIA GPU 和 CUDA 支持，性能提升约 5-10 倍
+- **自动检测**：设置 `BGE_DEVICE=auto` 可自动选择最佳设备
+
+### 替换模型
+
+如需使用其他 BGE 模型（如 `bge-base-zh-v1.5` 或 `bge-large-zh-v1.5`）：
+
+1. 下载模型到本地目录
+2. 设置环境变量：
+   ```bash
+   set BGE_MODEL=D:\ai\models\baai\bge-base-zh-v1.5
+   ```
+3. 重启服务
+
 ## 特性
 
 - **本地部署**：完全离线运行，保护数据隐私
@@ -33,7 +82,7 @@
 
 ```bash
 git clone <仓库地址>
-cd test-ai
+cd <项目名称>
 ```
 
 ### 2. 创建虚拟环境
@@ -212,11 +261,11 @@ docs = vectorstore.similarity_search(query)
 
 | 变量 | 默认值 | 描述 |
 |------|--------|------|
-| BGE_MODEL | `models/baai/bge-small-zh-v1.5` | 模型路径 |
-| BGE_CACHE_DIR | `models/baai/bge-small-zh-v1.5-cache` | 缓存目录 |
+| BGE_MODEL | `D:\ai\models\baai\bge-small-zh-v1.5` | 模型路径 |
+| BGE_CACHE_DIR | `D:\ai\models\baai\bge-small-zh-v1.5-cache` | 缓存目录 |
 | BGE_PORT | 7860 | 服务端口 |
 | BGE_HOST | 127.0.0.1 | 服务主机 |
-| BGE_DEVICE | cpu | 设备 (cpu/gpu/auto) |
+| BGE_DEVICE | cuda | 设备 (cpu/gpu/auto) |
 | BGE_BATCH_SIZE | 32 | 批处理大小 |
 | BGE_MAX_SEQ_LENGTH | 512 | 最大序列长度 |
 
@@ -351,3 +400,15 @@ set BGE_BATCH_SIZE=16
 - [COMMANDS.md](docs/COMMANDS.md) - 详细命令说明
 - [QWEN.md](docs/QWEN.md) - Qwen 集成说明
 - [IFLOW.md](docs/IFLOW.md) - Flow 集成说明
+- [LICENSES.md](LICENSES.md) - 许可证信息
+
+## 许可证
+
+本项目采用 MIT License 开源。使用的模型和依赖均有各自的许可证：
+
+- **BGE 模型**: Apache-2.0
+- **FastAPI**: MIT
+- **PyTorch**: BSD-3-Clause
+- **sentence-transformers**: Apache-2.0
+
+详见 [LICENSES.md](LICENSES.md) 获取完整的许可证信息。
