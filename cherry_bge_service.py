@@ -22,10 +22,10 @@ os.environ['HF_HUB_OFFLINE'] = '1'
 # 尝试导入sentence-transformers库
 try:
     from sentence_transformers import SentenceTransformer
-    import torch.nn.functional as F
 except Exception:
     SentenceTransformer = None
-    F = None
+
+import torch.nn.functional as F
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bge_service")
